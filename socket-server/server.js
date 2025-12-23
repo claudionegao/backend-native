@@ -11,25 +11,39 @@ const httpServer = createServer((req, res) => {
     res.writeHead(200, {
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     });
     res.end(JSON.stringify({ ok: true }));
     return;
   }
-  res.writeHead(404);
-  res.end();
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    });
+    res.end();
+    return;
+  }
+
+  res.writeHead(404, { "Content-Type": "text/plain" });
+  res.end("Not Found");
 });
 
 const io = new Server(httpServer, {
+  path: "/socket.io", // explícito (combina com o cliente)
   cors: { origin: "*", methods: ["GET", "POST"] },
   transports: ["polling", "websocket"],
 });
 
 /** Estado dos pareamentos em memória */
-const pairs = new Map(); // pairId -> { members: Set, values: {}, confirmed: Set, lastResult: {} }
+const pairs = new Map(); // pairId -> { members: Set<string>, values: Record<string,number>, confirmed: Set<string>, lastResult: {...} }
 
 /** util: cria um ID curto aleatório */
 function makePairId() {
-  return crypto.randomBytes(3).toString("hex"); // 6 chars
+  return crypto.randomBytes(3).toString("hex"); // ex.: "a1b2c3"
 }
 
 /** helper: calcula resultado final */
@@ -42,6 +56,22 @@ function computeResult(pair) {
   if (typeof a !== "number" || typeof b !== "number") return null;
   const avg = Math.round((a + b) / 2);
   return { a, b, avg, at: new Date().toISOString() };
+}
+
+/** helper: emite 'pair:ready' para a sala com o count atual */
+function emitReady(pairId) {
+  const state = pairs.get(pairId);
+  if (!state) return;
+  const count = state.members.size;
+  io.to(pairId).emit("pair:ready", { pairId, count });
+}
+
+/** helper: limpa confirmações/resultado quando necessário */
+function clearConfirmations(pairId) {
+  const state = pairs.get(pairId);
+  if (!state) return;
+  state.confirmed.clear();
+  state.lastResult = null;
 }
 
 io.on("connection", (socket) => {
@@ -65,27 +95,78 @@ io.on("connection", (socket) => {
 
     socket.join(pairId);
     console.log(`👫 pair:create ${pairId} by ${socket.id}`);
-    cb?.({ ok: true, pairId, role: "A" });
+    cb?.({ ok: true, pairId, role: "A", count: 1 });
   });
 
-  /** Entrar no pareamento via pairId (QR) */
+  /** Entrar no pareamento via pairId (QR ou input) */
   socket.on("pair:join", ({ pairId }, cb) => {
+    try {
+      if (!pairId || typeof pairId !== "string") {
+        cb?.({ ok: false, error: "INVALID_PAIR_ID" });
+        return;
+      }
+      const state = pairs.get(pairId);
+      if (!state) {
+        cb?.({ ok: false, error: "PAIR_NOT_FOUND" });
+        return;
+      }
+      if (state.members.size >= 2) {
+        cb?.({ ok: false, error: "PAIR_FULL" });
+        return;
+      }
+
+      state.members.add(socket.id);
+      socket.join(pairId);
+      const count = state.members.size;
+
+      console.log(`👫 pair:join ${pairId} by ${socket.id} (count=${count})`);
+
+      // notifica sala com o count atual
+      emitReady(pairId);
+
+      // devolve count no callback (cliente pode navegar direto)
+      cb?.({ ok: true, role: "B", count });
+    } catch (err) {
+      cb?.({ ok: false, error: "JOIN_ERROR" });
+      console.error("pair:join error:", err);
+    }
+  });
+
+  /** Consultar status do pareamento (quantos membros) */
+  socket.on("pair:status", ({ pairId }, cb) => {
     const state = pairs.get(pairId);
     if (!state) {
       cb?.({ ok: false, error: "PAIR_NOT_FOUND" });
       return;
     }
-    if (state.members.size >= 2) {
-      cb?.({ ok: false, error: "PAIR_FULL" });
+    cb?.({ ok: true, count: state.members.size });
+  });
+
+  /** Saída explícita do pareamento (opcional) */
+  socket.on("pair:leave", ({ pairId }, cb) => {
+    const state = pairs.get(pairId);
+    if (!state) {
+      cb?.({ ok: false, error: "PAIR_NOT_FOUND" });
       return;
     }
-    state.members.add(socket.id);
-    socket.join(pairId);
-    console.log(`👫 pair:join ${pairId} by ${socket.id}`);
+    if (!state.members.has(socket.id)) {
+      cb?.({ ok: false, error: "NOT_IN_PAIR" });
+      return;
+    }
+    state.members.delete(socket.id);
+    socket.leave(pairId);
 
-    // notifica sala que agora tem 2
-    io.to(pairId).emit("pair:ready", { pairId, count: state.members.size });
-    cb?.({ ok: true, role: "B" });
+    console.log(`🚪 pair:leave ${pairId} by ${socket.id}`);
+
+    if (state.members.size === 0) {
+      pairs.delete(pairId);
+    } else {
+      clearConfirmations(pairId);
+      io.to(pairId).emit("pair:member_left", { pairId, count: state.members.size });
+      emitReady(pairId); // atualiza count para quem ficou
+    }
+
+    cb?.({ ok: true });
   });
 
   /** Atualizar valor do slider (não divulgar ao parceiro) */
@@ -97,10 +178,13 @@ io.on("connection", (socket) => {
     }
     const v = Math.max(0, Math.min(100, Number(value)));
     state.values[socket.id] = v;
-    // ao mudar valor, se já estava confirmado, desconfirma
+
+    // ao mudar valor, se já estava confirmado, desconfirma e limpa resultados antigos
     if (state.confirmed.has(socket.id)) {
       state.confirmed.delete(socket.id);
     }
+    state.lastResult = null;
+
     cb?.({ ok: true });
   });
 
@@ -111,6 +195,7 @@ io.on("connection", (socket) => {
       cb?.({ ok: false, error: "INVALID_PAIR_OR_MEMBER" });
       return;
     }
+
     state.confirmed.add(socket.id);
 
     if (state.confirmed.size === 2) {
@@ -119,9 +204,8 @@ io.on("connection", (socket) => {
         state.lastResult = result;
         io.to(pairId).emit("vote:result", { pairId, ...result });
       } else {
-        // dados incompletos; mantém confirmação?
-        // opção: limpar confirmações
-        state.confirmed.clear();
+        // dados incompletos; limpa confirmações para evitar travas
+        clearConfirmations(pairId);
       }
     }
     cb?.({ ok: true });
@@ -137,6 +221,7 @@ io.on("connection", (socket) => {
     state.values = {};
     state.confirmed.clear();
     state.lastResult = null;
+
     io.to(pairId).emit("vote:reset", { pairId });
     cb?.({ ok: true });
   });
@@ -147,14 +232,15 @@ io.on("connection", (socket) => {
     // remover o socket de qualquer pair
     for (const [pairId, state] of pairs.entries()) {
       if (state.members.delete(socket.id)) {
-        // se sala ficou vazia, remove
+        socket.leave(pairId);
+
         if (state.members.size === 0) {
           pairs.delete(pairId);
         } else {
           // se sobrou 1 membro, desconfirma e limpa resultado
-          state.confirmed.clear();
-          state.lastResult = null;
+          clearConfirmations(pairId);
           io.to(pairId).emit("pair:member_left", { pairId, count: state.members.size });
+          emitReady(pairId);
         }
       }
     }

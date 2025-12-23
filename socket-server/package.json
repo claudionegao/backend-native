@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": {
+   "scripts": {
+    "build": "echo build skipped",
     "start": "node server.js"
   },
   "dependencies": {

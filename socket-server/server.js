@@ -39,7 +39,7 @@ const io = new Server(httpServer, {
 
 io.on("connection", (socket) => {
   console.log("🔌 conectado:", socket.id);
-
+  
   // ping/pong (do seu exemplo)
   socket.on("ping", (data) => {
     socket.emit("pong", { ...data, serverAt: new Date().toISOString() });
@@ -47,7 +47,7 @@ io.on("connection", (socket) => {
 
   socket.on('message', (data) => {
     console.log(data)
-    socket.emit('message',data)
+    socket.broadcast.emit('message', data);
   })
   /** Cleanup ao desconectar */
   socket.on("disconnect", (reason) => {

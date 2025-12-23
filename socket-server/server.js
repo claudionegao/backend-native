@@ -46,6 +46,9 @@ io.on("connection", (socket) => {
     socket.emit("pong", { ...data, serverAt: new Date().toISOString() });
   });
 
+  socket.on('message', (data) => {
+    socket.emit('message',data)
+  })
   /** Cleanup ao desconectar */
   socket.on("disconnect", (reason) => {
     console.log("❌ desconectado:", socket.id, reason);

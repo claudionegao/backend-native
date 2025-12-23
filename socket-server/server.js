@@ -2,7 +2,6 @@
 // server.js
 import { createServer } from "http";
 import { Server } from "socket.io";
-import { handleData } from "./handledata";
 
 const PORT = process.env.PORT || 3000;
 

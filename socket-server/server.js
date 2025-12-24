@@ -47,7 +47,10 @@ io.on("connection", (socket) => {
 
   socket.on('message', (data) => {
     console.log(data)
-    socket.broadcast.emit('message', data);
+    //socket.broadcast.emit('message', data);
+  })
+  socket.onAny((event, ...args) => {
+    socket.broadcast.emit(event, args);
   })
   /** Cleanup ao desconectar */
   socket.on("disconnect", (reason) => {

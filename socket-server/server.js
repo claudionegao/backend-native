@@ -44,12 +44,8 @@ io.on("connection", (socket) => {
   socket.on("ping", (data) => {
     socket.emit("pong", { ...data, serverAt: new Date().toISOString() });
   });
-
-  socket.on('message', (data) => {
-    console.log(data)
-    //socket.broadcast.emit('message', data);
-  })
   socket.onAny((event, ...args) => {
+    console.log(args)
     socket.broadcast.emit(event, args);
   })
   /** Cleanup ao desconectar */
